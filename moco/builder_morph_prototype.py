@@ -73,8 +73,8 @@ class MoCo(nn.Module):
             q = self.encoder_q(im_k)
             k = nn.functional.normalize(k, dim=1)
             q = nn.functional.normalize(q, dim=1)
-            logits_q = torch.mm(q, centroids.t())/temp
-            logits_k = torch.mm(k, centroids.t())/temp
+            logits_q = torch.mm(q, centroids.t()) / temp
+            logits_k = torch.mm(k, centroids.t()) / temp
 
             #print(logits_k.max(dim=1))
             pseudo_label = torch.softmax(logits_k.detach(), dim=-1)

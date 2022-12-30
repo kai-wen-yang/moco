@@ -44,7 +44,7 @@ else:
 # noinspection PyPep8Naming
 def _h_beta_torch(D: torch.Tensor, beta: float = 1.0):
     P = torch.exp(-D * beta)
-    sumP = torch.sum(P)
+    sumP = torch.sum(P) + torch.finfo(float).eps
     H = torch.log(sumP) + beta * torch.sum(D * P) / sumP
     P = P / sumP
     return H, P

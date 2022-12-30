@@ -245,13 +245,15 @@ def main_worker(gpu, ngpus_per_node, args):
 
             # rename moco pre-trained keys
             state_dict = checkpoint['state_dict']
+            if 'moco' in args.pretrained:
+                new_state_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    name = k[7:]  # remove `module.`，表面从第7个key值字符取到最后一个字符，正好去掉了module.
+                    new_state_dict[name] = v
 
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k[7:]  # remove `module.`，表面从第7个key值字符取到最后一个字符，正好去掉了module.
-                new_state_dict[name] = v
-
-            msg = model.load_state_dict(new_state_dict, strict=False)
+                msg = model.load_state_dict(new_state_dict, strict=False)
+            else:
+                msg = model.load_state_dict(state_dict, strict=False)
             print(msg)
 
             print("=> loaded pre-trained model '{}'".format(args.pretrained))
@@ -261,7 +263,6 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
@@ -272,66 +273,40 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize
     ]
 
-    augmentation_strong = [
-        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.5),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
-    train_dataset = moco.loader.ImageFolderInstance(
-        traindir,
-        moco.loader.TwoDiffTransform(transforms.Compose(augmentation), transforms.Compose(augmentation_strong)))
-
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
-
-    if not args.distributed or args.gpu==0:
-        writer = wandb.init(config=args, name='morphcentroid_temp{}'.format(args.temperature)+args.target_dataset)
-    else:
-        writer = None
-
-    print("=> data loaded")
     # target dataset
     data_path = os.path.join(args.target_data_path, args.target_dataset)
     target_dataset = moco.loader.VTAB(root=data_path, train=True, transform=transforms.Compose(augmentation))
-    target_loader = torch.utils.data.DataLoader(
-        target_dataset, batch_size=args.target_batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    cluster_result = torch.load('./results/cluster_20000') #
-    centroids = cluster_result['centroids'][0] # select length, 128
+    if args.distributed:
+        target_sampler = torch.utils.data.distributed.DistributedSampler(target_dataset)
+    else:
+        target_sampler = None
+
+    print("=> data loaded")
+    target_loader = torch.utils.data.DataLoader(
+        target_dataset, batch_size=args.target_batch_size, shuffle=(target_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=target_sampler)
+
+    cluster_result = torch.load('./results/cluster_result_v2')  #
+    centroids = cluster_result['centroids'][0]  # select length, 128
+    random_centroids = torch.LongTensor(random.sample(range(centroids.size(0)), 1000))
 
     target_features = F.normalize(compute_target_features(target_loader, model, args)) # num target class, 128
     similarity = centroids.mm(target_features.t()) # cluster num, class num
-    similarity_sum = similarity.sum(dim=1)
-    sorted, indices = torch.sort(similarity_sum, descending=True)
-    selected_centroids = indices[:int(args.num_cluster*0.1)]  # cluster num
-    random_centroids = torch.LongTensor(random.sample(range(centroids.size(0)), int(args.num_cluster * 0.1)))
-
-    centroids_target = F.normalize(F.softmax(similarity).mm(target_features))
+    centroids_target = F.normalize(F.softmax(similarity/args.moco_t).mm(target_features))
     del cluster_result
 
-    X = torch.cat((centroids[selected_centroids], centroids_target[selected_centroids], target_features, centroids[random_centroids], centroids_target[random_centroids]), dim=0)
-    label = torch.cat((torch.zeros(selected_centroids.size(0)),
-                       torch.ones(selected_centroids.size(0)),
-                       torch.ones(target_features.size(0))*2,
-                       torch.ones(selected_centroids.size(0))*3,
-                       torch.ones(selected_centroids.size(0))*4,
-                        ), dim=0)
+    X = torch.cat((centroids[random_centroids], centroids_target[random_centroids], target_features), dim=0)
+    label = torch.cat((torch.zeros(random_centroids.size(0)),
+                       torch.ones(random_centroids.size(0)),
+                       torch.ones(target_features.size(0))*2 ), dim=0)
     with torch.no_grad():
         Y = TSNE(n_components=2, perplexity=30, n_iter=100, verbose=True).fit_transform(X)
 
     pyplot.scatter(Y[:, 0], Y[:, 1], 20, label)
     pyplot.show()
-    pyplot.savefig('./test5.jpg')
+    pyplot.savefig('./tsne{}_{}.jpg'.format(args.moco_t, args.pretrained.split('/')[2]
+    ))
 
 
 def compute_target_features(eval_loader, model, args):
@@ -346,7 +321,7 @@ def compute_target_features(eval_loader, model, args):
             torch.utils.data.Subset(eval_loader.dataset, class_index),
             batch_size=len(class_index), num_workers=args.workers, pin_memory=True)
 
-        for images, _ in temp_loader:
+        for images, _, _ in temp_loader:
             with torch.no_grad():
                 images = images.cuda(non_blocking=True)
                 feat = model(images, is_eval=True)

@@ -221,13 +221,6 @@ def main_worker(gpu, ngpus_per_node, args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
-    if not args.distributed or args.gpu==0:
-        args.save_dir = './results/'+'targetnodataselect{}'.format(args.moco_t)+args.target_dataset
-        writer = wandb.init(config=args, name=args.save_dir.replace("./results/", ''))
-        mkdir_if_missing(args.save_dir)
-    else:
-        writer = None
-
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -312,6 +305,13 @@ def main_worker(gpu, ngpus_per_node, args):
         train_sampler = None
         target_sampler = None
 
+    if not args.distributed or args.gpu==0:
+        args.save_dir = './results/'+'targetnodataselect_selectclose{}'.format(args.moco_t)+args.target_dataset
+        writer = wandb.init(config=args, name=args.save_dir.replace("./results/", ''))
+        mkdir_if_missing(args.save_dir)
+    else:
+        writer = None
+
     print("=> data loaded")
     # target dataset
     target_loader = torch.utils.data.DataLoader(
@@ -333,11 +333,21 @@ def main_worker(gpu, ngpus_per_node, args):
         #torch.save(cluster_result, './results/cluster_20000')
 
         centroids = cluster_result['centroids'][0] # select length, 128
+        im2cluster = cluster_result['im2cluster'][0]
 
-        data_indices = np.array(torch.load('./results/sample_indices'))#random.sample(range(len(train_dataset)), 130000)  # new length
+        data_indices = np.arange(len(train_dataset))
+        target_features = F.normalize(compute_target_features(target_loader, model, args))  # num target class, 128
+        similarity = centroids.mm(target_features.t())  # cluster num, class num
+        similarity_sum = similarity.sum(dim=1)
+        sorted, indices = torch.sort(similarity_sum, descending=True)
+        selected_centroids = indices[:2000]  # cluster num
+        select = torch.Tensor(
+            [1 if item in selected_centroids else 0 for item in im2cluster.tolist()]).bool()  # select length, 1
+        data_indices = data_indices[select]  # new length
+
         #torch.save(data_indices, './results/sample_indices')
         centroids_morph = centroids
-        random_centroids = torch.LongTensor(random.sample(range(centroids.size(0)), 1000))
+        random_centroids = selected_centroids
 
     if args.distributed:
         dist.barrier()
